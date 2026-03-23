@@ -660,11 +660,13 @@ const state = {
 // ─── Helpers ─────────────────────────────────────────────
 const $ = id => document.getElementById(id);
 const origin = location.origin;
+// Use the exact current page URL (no query string/hash) as the redirect URI
+const redirectUri = location.origin + location.pathname;
 
 // Set redirect URI hints in the guide
-$('redirect-uri-spotify').textContent = origin + '/';
+$('redirect-uri-spotify').textContent = redirectUri;
 $('yt-origin').textContent = origin;
-$('redirect-uri-yt').textContent = origin + '/';
+$('redirect-uri-yt').textContent = redirectUri;
 
 function setStep(n) {
   [1,2,3].forEach(i => {
@@ -726,7 +728,7 @@ async function spotifyAuth() {
   const params = new URLSearchParams({
     client_id: clientId,
     response_type: 'code',
-    redirect_uri: origin + '/',
+    redirect_uri: redirectUri,
     code_challenge_method: 'S256',
     code_challenge: challenge,
     scope: 'playlist-read-private playlist-read-collaborative',
@@ -749,7 +751,7 @@ function ytAuth() {
 
   const params = new URLSearchParams({
     client_id: clientId,
-    redirect_uri: origin + '/',
+    redirect_uri: redirectUri,
     response_type: 'token',
     scope: 'https://www.googleapis.com/auth/youtube',
     state: 'yt_auth',
@@ -812,7 +814,7 @@ async function exchangeSpotifyCode(code) {
         client_id: clientId,
         grant_type: 'authorization_code',
         code,
-        redirect_uri: origin + '/',
+        redirect_uri: redirectUri,
         code_verifier: verifier,
       }),
     });
