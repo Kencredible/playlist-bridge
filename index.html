@@ -699,7 +699,7 @@ function setProgress(current, total, label) {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-// ─── Spotify OAuth (PKCE) ────────────────────────────────
+// ─── Spotify OAuth (PKCE) — same-tab redirect flow ────────
 async function sha256(plain) {
   const enc = new TextEncoder();
   return crypto.subtle.digest('SHA-256', enc.encode(plain));
@@ -719,11 +719,14 @@ async function generatePKCE() {
 async function spotifyAuth() {
   const clientId = $('spotify-client-id').value.trim();
   if (!clientId) { alert('Please enter your Spotify Client ID first.'); return; }
-  state.spotifyClientId = clientId;
+
+  // Persist across the redirect
+  localStorage.setItem('sp_clientId', clientId);
+  localStorage.setItem('yt_clientId', $('yt-client-id').value.trim());
 
   const { verifier, challenge } = await generatePKCE();
-  sessionStorage.setItem('sp_verifier', verifier);
-  sessionStorage.setItem('sp_clientId', clientId);
+  localStorage.setItem('sp_verifier', verifier);
+  localStorage.setItem('auth_pending', 'spotify');
 
   const params = new URLSearchParams({
     client_id: clientId,
@@ -735,19 +738,22 @@ async function spotifyAuth() {
     state: 'spotify_auth',
   });
 
-  window.open('https://accounts.spotify.com/authorize?' + params, '_blank', 'width=500,height=700');
-  $('spotify-status').textContent = '⏳ Waiting for auth…';
-
-  // Listen for redirect
-  listenForToken('spotify');
+  // Same-tab redirect
+  location.href = 'https://accounts.spotify.com/authorize?' + params;
 }
 
-// ─── YouTube OAuth (implicit) ─────────────────────────────
+// ─── YouTube OAuth (implicit) — same-tab redirect flow ────
 function ytAuth() {
   const clientId = $('yt-client-id').value.trim();
   if (!clientId) { alert('Please enter your Google OAuth Client ID first.'); return; }
-  state.ytClientId = clientId;
-  sessionStorage.setItem('yt_clientId', clientId);
+
+  // Persist across the redirect
+  localStorage.setItem('yt_clientId', clientId);
+  localStorage.setItem('sp_clientId', $('spotify-client-id').value.trim());
+  localStorage.setItem('auth_pending', 'youtube');
+
+  // Persist already-connected Spotify token if we have it
+  if (state.spotifyToken) localStorage.setItem('sp_token_temp', state.spotifyToken);
 
   const params = new URLSearchParams({
     client_id: clientId,
@@ -755,50 +761,15 @@ function ytAuth() {
     response_type: 'token',
     scope: 'https://www.googleapis.com/auth/youtube',
     state: 'yt_auth',
-    include_granted_scopes: 'true',
   });
 
-  window.open('https://accounts.google.com/o/oauth2/v2/auth?' + params, '_blank', 'width=500,height=700');
-  $('yt-status').textContent = '⏳ Waiting for auth…';
-
-  listenForToken('youtube');
-}
-
-// ─── Token listener via sessionStorage polling only ────
-function listenForToken(service) {
-  const maxWait = 300; // 2.5 minutes
-  let ticks = 0;
-  const interval = setInterval(() => {
-    ticks++;
-    if (ticks > maxWait) {
-      clearInterval(interval);
-      if (service === 'spotify') $('spotify-status').textContent = '❌ Timed out. Try again.';
-      else $('yt-status').textContent = '❌ Timed out. Try again.';
-      return;
-    }
-    if (service === 'spotify') {
-      const code = sessionStorage.getItem('sp_code');
-      if (code) {
-        sessionStorage.removeItem('sp_code');
-        clearInterval(interval);
-        exchangeSpotifyCode(code);
-      }
-    } else {
-      const token = sessionStorage.getItem('yt_token');
-      if (token) {
-        sessionStorage.removeItem('yt_token');
-        clearInterval(interval);
-        state.ytToken = token;
-        $('yt-status').textContent = '✅ Connected!';
-        checkBothAuth();
-      }
-    }
-  }, 500);
+  location.href = 'https://accounts.google.com/o/oauth2/v2/auth?' + params;
 }
 
 async function exchangeSpotifyCode(code) {
-  const verifier = sessionStorage.getItem('sp_verifier');
-  const clientId = sessionStorage.getItem('sp_clientId') || state.spotifyClientId;
+  const verifier = localStorage.getItem('sp_verifier');
+  const clientId = localStorage.getItem('sp_clientId');
+  $('spotify-status').textContent = '⏳ Exchanging token…';
   try {
     const res = await fetch('https://accounts.spotify.com/api/token', {
       method: 'POST',
@@ -814,10 +785,11 @@ async function exchangeSpotifyCode(code) {
     const data = await res.json();
     if (data.access_token) {
       state.spotifyToken = data.access_token;
+      localStorage.setItem('sp_token_temp', data.access_token);
       $('spotify-status').textContent = '✅ Connected!';
       checkBothAuth();
     } else {
-      $('spotify-status').textContent = '❌ Auth failed: ' + (data.error || JSON.stringify(data));
+      $('spotify-status').textContent = '❌ ' + (data.error_description || data.error || JSON.stringify(data));
     }
   } catch (err) {
     $('spotify-status').textContent = '❌ Error: ' + err.message;
@@ -826,10 +798,11 @@ async function exchangeSpotifyCode(code) {
 
 function checkBothAuth() {
   $('btn-next-1').disabled = !(state.spotifyToken && state.ytToken);
+  if (state.spotifyToken) $('spotify-status').textContent = '✅ Connected!';
+  if (state.ytToken) $('yt-status').textContent = '✅ Connected!';
 }
 
-// ─── Handle OAuth redirect in this tab ───────────────────
-// When Spotify redirects back with ?code=... in this tab
+// ─── Handle OAuth redirect back to this page ──────────────
 (function handleRedirectIfNeeded() {
   const url = new URL(location.href);
   const code = url.searchParams.get('code');
@@ -838,31 +811,37 @@ function checkBothAuth() {
   const ytToken = hashParams.get('access_token');
   const ytState = hashParams.get('state') || url.searchParams.get('state');
 
-  if (code && stateParam === 'spotify_auth') {
-    sessionStorage.setItem('sp_code', code);
-    // Clean URL regardless of whether popup or same tab
+  // Restore client ID inputs and any previously saved tokens
+  const savedSpClientId = localStorage.getItem('sp_clientId') || '';
+  const savedYtClientId = localStorage.getItem('yt_clientId') || '';
+  if (savedSpClientId) { const el = $('spotify-client-id'); if (el) el.value = savedSpClientId; }
+  if (savedYtClientId) { const el = $('yt-client-id'); if (el) el.value = savedYtClientId; }
+
+  // Restore a Spotify token that survived a YT redirect
+  const savedSpToken = localStorage.getItem('sp_token_temp');
+  if (savedSpToken) {
+    state.spotifyToken = savedSpToken;
+  }
+
+  // Clean up URL
+  if (code || ytToken) {
     history.replaceState({}, '', redirectUri);
-    if (window.opener) {
-      setTimeout(() => window.close(), 300);
-    } else {
-      // Same-tab redirect: exchange code immediately
-      exchangeSpotifyCode(code);
-    }
+  }
+  if (location.hash) {
+    history.replaceState({}, '', location.href.split('#')[0]);
+  }
+
+  if (code && stateParam === 'spotify_auth') {
+    exchangeSpotifyCode(code);
   }
 
   if (ytToken && ytState === 'yt_auth') {
-    sessionStorage.setItem('yt_token', ytToken);
-    history.replaceState({}, '', redirectUri);
-    location.hash = '';
-    if (window.opener) {
-      setTimeout(() => window.close(), 300);
-    } else {
-      // Same-tab redirect: restore token immediately
-      state.ytToken = ytToken;
-      $('yt-status').textContent = '✅ Connected!';
-      checkBothAuth();
-    }
+    state.ytToken = ytToken;
+    checkBothAuth();
   }
+
+  // Update UI to reflect any restored state
+  checkBothAuth();
 })();
 
 // ─── Spotify API ─────────────────────────────────────────
