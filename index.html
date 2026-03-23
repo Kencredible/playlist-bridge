@@ -734,7 +734,7 @@ async function spotifyAuth() {
     redirect_uri: redirectUri,
     code_challenge_method: 'S256',
     code_challenge: challenge,
-    scope: 'playlist-read-private playlist-read-collaborative',
+    scope: 'playlist-read-private playlist-read-collaborative user-library-read',
     state: 'spotify_auth',
   });
 
@@ -858,7 +858,15 @@ async function fetchPlaylistTracks(playlistId) {
   while (url) {
     const res = await fetch(url, { headers: { Authorization: 'Bearer ' + state.spotifyToken } });
     const data = await res.json();
-    if (data.error) throw new Error(`Spotify API ${data.error.status}: ${data.error.message}`);
+    if (data.error) {
+      if (data.error.status === 403) {
+        throw new Error('403 Forbidden — your Spotify token may be expired or missing scopes. Go back to Step 1 and reconnect Spotify.');
+      }
+      if (data.error.status === 401) {
+        throw new Error('401 Unauthorized — Spotify token expired. Go back to Step 1 and reconnect Spotify.');
+      }
+      throw new Error(`Spotify API ${data.error.status}: ${data.error.message}`);
+    }
     tracks = tracks.concat(data.items || []);
     url = data.next;
   }
@@ -979,6 +987,26 @@ async function startMigration() {
   $('btn-back-2').disabled = true;
 
   log(`Starting migration of "${pl.name}" (${pl.tracks?.total ?? "?"} tracks)`, 'info');
+
+  // Validate Spotify token before starting
+  log('Validating Spotify connection…', 'info');
+  try {
+    const checkRes = await fetch('https://api.spotify.com/v1/me', {
+      headers: { Authorization: 'Bearer ' + state.spotifyToken }
+    });
+    const checkData = await checkRes.json();
+    if (checkData.error) {
+      log('❌ Spotify token invalid: ' + checkData.error.message, 'err');
+      log('👉 Go back to Step 1 and reconnect Spotify, then try again.', 'warn');
+      state.migrating = false;
+      $('btn-start-migrate').disabled = false;
+      $('btn-back-2').disabled = false;
+      return;
+    }
+    log(`✓ Spotify connected as: ${checkData.display_name || checkData.id}`, 'ok');
+  } catch(e) {
+    log('❌ Could not validate Spotify token: ' + e.message, 'err');
+  }
 
   // Fetch all tracks
   log('Fetching track list from Spotify…', 'info');
