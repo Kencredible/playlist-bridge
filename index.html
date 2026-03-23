@@ -879,6 +879,7 @@ async function fetchPlaylistTracks(playlistId) {
   while (url) {
     const res = await fetch(url, { headers: { Authorization: 'Bearer ' + state.spotifyToken } });
     const data = await res.json();
+    if (data.error) throw new Error(`Spotify API ${data.error.status}: ${data.error.message}`);
     tracks = tracks.concat(data.items || []);
     url = data.next;
   }
@@ -994,8 +995,18 @@ async function startMigration() {
     return;
   }
 
-  const validTracks = trackItems.filter(t => t.track?.name);
-  log(`Found ${validTracks.length} valid tracks.`, 'ok');
+  log(`Raw items from Spotify: ${trackItems.length}`, 'info');
+  const validTracks = trackItems.filter(t => t?.track?.name);
+  const skipped = trackItems.length - validTracks.length;
+  if (skipped > 0) log(`Skipped ${skipped} items (local files/episodes)`, 'warn');
+  log(`Found ${validTracks.length} valid tracks.`, validTracks.length > 0 ? 'ok' : 'err');
+  if (validTracks.length === 0) {
+    log('⚠ No valid tracks found. Your Spotify token may have expired — try reconnecting.', 'err');
+    state.migrating = false;
+    $('btn-start-migrate').disabled = false;
+    $('btn-back-2').disabled = false;
+    return;
+  }
 
   // Create YT playlist
   log('Creating YouTube Music playlist…', 'info');
