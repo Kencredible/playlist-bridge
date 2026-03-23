@@ -846,7 +846,7 @@ function checkBothAuth() {
 
 // ─── Spotify API ─────────────────────────────────────────
 async function fetchSpotifyPlaylists() {
-  const res = await fetch('https://api.spotify.com/v1/me/playlists?limit=50&fields=items(id,name,images,tracks(total)),next', {
+  const res = await fetch('https://api.spotify.com/v1/me/playlists?limit=50', {
     headers: { Authorization: 'Bearer ' + state.spotifyToken },
   });
   return res.json();
@@ -854,17 +854,26 @@ async function fetchSpotifyPlaylists() {
 
 async function fetchPlaylistTracks(playlistId) {
   let tracks = [];
-  let url = `https://api.spotify.com/v1/playlists/${playlistId}/tracks?limit=100`;
+  // Use market=from_token to handle region-restricted playlists
+  // Use fields to only request what we need (avoids permission issues on some fields)
+  let url = `https://api.spotify.com/v1/playlists/${playlistId}/tracks?limit=100&market=from_token&fields=next,items(track(id,name,artists(name)))`;
   while (url) {
     const res = await fetch(url, { headers: { Authorization: 'Bearer ' + state.spotifyToken } });
     const data = await res.json();
     if (data.error) {
-      if (data.error.status === 403) {
-        throw new Error('403 Forbidden — your Spotify token may be expired or missing scopes. Go back to Step 1 and reconnect Spotify.');
+      if (data.error.status === 403 || data.error.status === 404) {
+        // Playlist may be restricted — try without fields param as fallback
+        const res2 = await fetch(
+          `https://api.spotify.com/v1/playlists/${playlistId}/tracks?limit=100&market=from_token`,
+          { headers: { Authorization: 'Bearer ' + state.spotifyToken } }
+        );
+        const data2 = await res2.json();
+        if (data2.error) throw new Error(`Cannot access playlist tracks (${data2.error.status}): ${data2.error.message}. This playlist may be restricted.`);
+        tracks = tracks.concat(data2.items || []);
+        url = data2.next;
+        continue;
       }
-      if (data.error.status === 401) {
-        throw new Error('401 Unauthorized — Spotify token expired. Go back to Step 1 and reconnect Spotify.');
-      }
+      if (data.error.status === 401) throw new Error('Spotify token expired — go back to Step 1 and reconnect.');
       throw new Error(`Spotify API ${data.error.status}: ${data.error.message}`);
     }
     tracks = tracks.concat(data.items || []);
@@ -942,16 +951,25 @@ async function loadPlaylists() {
       container.appendChild(div);
     }
 
-    // For any playlist still missing a track total, fetch it separately
+    // For any playlist missing a track total, fetch it
     const fullPlaylists = await Promise.all(playlists.map(async pl => {
       if (pl.tracks?.total != null && pl.tracks.total > 0) return pl;
       try {
-        const r = await fetch(`https://api.spotify.com/v1/playlists/${pl.id}/tracks?limit=1`, {
+        const r = await fetch(`https://api.spotify.com/v1/playlists/${pl.id}?fields=tracks.total`, {
           headers: { Authorization: 'Bearer ' + state.spotifyToken }
         });
         const d = await r.json();
-        pl.tracks = { total: d.total ?? 0 };
-      } catch(e) { /* keep whatever we have */ }
+        if (d.tracks?.total != null) {
+          pl.tracks = { total: d.tracks.total };
+        } else {
+          // Last resort: hit tracks endpoint
+          const r2 = await fetch(`https://api.spotify.com/v1/playlists/${pl.id}/tracks?limit=1&market=from_token`, {
+            headers: { Authorization: 'Bearer ' + state.spotifyToken }
+          });
+          const d2 = await r2.json();
+          pl.tracks = { total: d2.total ?? '?' };
+        }
+      } catch(e) { pl.tracks = pl.tracks || { total: '?' }; }
       return pl;
     }));
 
