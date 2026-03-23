@@ -846,7 +846,7 @@ function checkBothAuth() {
 
 // ─── Spotify API ─────────────────────────────────────────
 async function fetchSpotifyPlaylists() {
-  const res = await fetch('https://api.spotify.com/v1/me/playlists?limit=50', {
+  const res = await fetch('https://api.spotify.com/v1/me/playlists?limit=50&fields=items(id,name,images,tracks(total)),next', {
     headers: { Authorization: 'Bearer ' + state.spotifyToken },
   });
   return res.json();
@@ -934,16 +934,16 @@ async function loadPlaylists() {
       container.appendChild(div);
     }
 
-    // Fetch full playlist details to get accurate track counts
+    // For any playlist still missing a track total, fetch it separately
     const fullPlaylists = await Promise.all(playlists.map(async pl => {
-      if (pl.tracks?.total != null) return pl;
+      if (pl.tracks?.total != null && pl.tracks.total > 0) return pl;
       try {
-        const r = await fetch(`https://api.spotify.com/v1/playlists/${pl.id}?fields=tracks.total`, {
+        const r = await fetch(`https://api.spotify.com/v1/playlists/${pl.id}/tracks?limit=1`, {
           headers: { Authorization: 'Bearer ' + state.spotifyToken }
         });
         const d = await r.json();
-        pl.tracks = { total: d.tracks?.total ?? 0 };
-      } catch(e) { pl.tracks = { total: 0 }; }
+        pl.tracks = { total: d.total ?? 0 };
+      } catch(e) { /* keep whatever we have */ }
       return pl;
     }));
 
