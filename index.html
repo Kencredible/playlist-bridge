@@ -764,10 +764,18 @@ function ytAuth() {
   listenForToken('youtube');
 }
 
-// ─── Token listener via BroadcastChannel + URL polling ────
+// ─── Token listener via sessionStorage polling only ────
 function listenForToken(service) {
-  // Check sessionStorage for already-received token (from redirect page)
+  const maxWait = 300; // 2.5 minutes
+  let ticks = 0;
   const interval = setInterval(() => {
+    ticks++;
+    if (ticks > maxWait) {
+      clearInterval(interval);
+      if (service === 'spotify') $('spotify-status').textContent = '❌ Timed out. Try again.';
+      else $('yt-status').textContent = '❌ Timed out. Try again.';
+      return;
+    }
     if (service === 'spotify') {
       const code = sessionStorage.getItem('sp_code');
       if (code) {
@@ -786,21 +794,6 @@ function listenForToken(service) {
       }
     }
   }, 500);
-
-  // Also post a helper page message
-  window.addEventListener('message', function handler(e) {
-    if (service === 'spotify' && e.data?.type === 'spotify_code') {
-      window.removeEventListener('message', handler);
-      clearInterval(interval);
-      exchangeSpotifyCode(e.data.code);
-    } else if (service === 'youtube' && e.data?.type === 'yt_token') {
-      window.removeEventListener('message', handler);
-      clearInterval(interval);
-      state.ytToken = e.data.token;
-      $('yt-status').textContent = '✅ Connected!';
-      checkBothAuth();
-    }
-  });
 }
 
 async function exchangeSpotifyCode(code) {
@@ -846,22 +839,29 @@ function checkBothAuth() {
   const ytState = hashParams.get('state') || url.searchParams.get('state');
 
   if (code && stateParam === 'spotify_auth') {
-    // Store for parent or self
     sessionStorage.setItem('sp_code', code);
+    // Clean URL regardless of whether popup or same tab
+    history.replaceState({}, '', redirectUri);
     if (window.opener) {
-      window.opener.postMessage({ type: 'spotify_code', code }, origin);
-      setTimeout(() => window.close(), 500);
+      setTimeout(() => window.close(), 300);
+    } else {
+      // Same-tab redirect: exchange code immediately
+      exchangeSpotifyCode(code);
     }
-    history.replaceState({}, '', '/');
   }
 
   if (ytToken && ytState === 'yt_auth') {
     sessionStorage.setItem('yt_token', ytToken);
-    if (window.opener) {
-      window.opener.postMessage({ type: 'yt_token', token: ytToken }, origin);
-      setTimeout(() => window.close(), 500);
-    }
+    history.replaceState({}, '', redirectUri);
     location.hash = '';
+    if (window.opener) {
+      setTimeout(() => window.close(), 300);
+    } else {
+      // Same-tab redirect: restore token immediately
+      state.ytToken = ytToken;
+      $('yt-status').textContent = '✅ Connected!';
+      checkBothAuth();
+    }
   }
 })();
 
@@ -940,18 +940,8 @@ async function loadPlaylists() {
       return;
     }
     container.innerHTML = '';
-    playlists.forEach(pl => {
-      const img = pl.images?.[0]?.url;
-      const div = document.createElement('div');
-      div.className = 'playlist-item';
-      div.innerHTML = `
-        ${img ? `<img class="playlist-img" src="${img}" alt="">` : `<div class="playlist-img-placeholder">🎵</div>`}
-        <div class="playlist-info">
-          <div class="playlist-name">${pl.name}</div>
-          <div class="playlist-tracks">${pl.tracks?.total ?? "?"} tracks</div>
-        </div>
-        <div class="check hidden">✓</div>
-      `;
+
+    function renderPlaylist(pl, div) {
       div.addEventListener('click', () => {
         document.querySelectorAll('.playlist-item').forEach(el => {
           el.classList.remove('selected');
@@ -963,6 +953,34 @@ async function loadPlaylists() {
         $('btn-next-2').disabled = false;
       });
       container.appendChild(div);
+    }
+
+    // Fetch full playlist details to get accurate track counts
+    const fullPlaylists = await Promise.all(playlists.map(async pl => {
+      if (pl.tracks?.total != null) return pl;
+      try {
+        const r = await fetch(`https://api.spotify.com/v1/playlists/${pl.id}?fields=tracks.total`, {
+          headers: { Authorization: 'Bearer ' + state.spotifyToken }
+        });
+        const d = await r.json();
+        pl.tracks = { total: d.tracks?.total ?? 0 };
+      } catch(e) { pl.tracks = { total: 0 }; }
+      return pl;
+    }));
+
+    fullPlaylists.forEach(pl => {
+      const img = pl.images?.[0]?.url;
+      const div = document.createElement('div');
+      div.className = 'playlist-item';
+      div.innerHTML = `
+        ${img ? `<img class="playlist-img" src="${img}" alt="">` : `<div class="playlist-img-placeholder">🎵</div>`}
+        <div class="playlist-info">
+          <div class="playlist-name">${pl.name}</div>
+          <div class="playlist-tracks">${pl.tracks?.total ?? 0} tracks</div>
+        </div>
+        <div class="check hidden">✓</div>
+      `;
+      renderPlaylist(pl, div);
     });
   } catch (err) {
     container.innerHTML = `<div class="alert alert-error">Failed to load playlists: ${err.message}</div>`;
